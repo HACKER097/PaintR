@@ -9,6 +9,7 @@ dependencies = [
  "image",
  "imageproc",
  "rand 0.9.1",
+ "rayon",
 ]
 
 [[package]]
