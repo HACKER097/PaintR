@@ -20,18 +20,6 @@ impl<T: Ord> BottomNHeap<T> {
         self.heap.push(Reverse(elem));
     }
 
-    pub fn remove_bottom_n(&mut self, n: usize) -> Vec<T> {
-        let mut removed = Vec::with_capacity(n);
-        for _ in 0..n {
-            if let Some(Reverse(val)) = self.heap.pop() {
-                removed.push(val);
-            } else {
-                break;
-            }
-        }
-        removed
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.heap.iter().map(|r| &r.0)
     }
@@ -45,6 +33,30 @@ impl<T: Ord> BottomNHeap<T> {
     }
 }
 
+impl<T: Send> IntoParallelIterator for BottomNHeap<T> {
+    type Item = T;
+    type Iter = rayon::vec::IntoIter<T>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        self.heap
+            .into_iter()
+            .map(|r| r.0)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+    }
+}
+
+impl<T: Clone + Send + Sync> BottomNHeap<T> {
+    pub fn par_iter_cloned(&self) -> impl ParallelIterator<Item = T> {
+        self.heap
+            .iter()
+            .map(|r| r.0.clone())
+            .collect::<Vec<_>>()
+            .into_par_iter()
+    }
+}
+
+#[derive(Clone)]
 struct Triangle{
     points: [Point<i32>; 3],
     color: Rgba<u8>,
@@ -67,7 +79,6 @@ impl PartialOrd for Triangle {
 
 impl Ord for Triangle {
     fn cmp(&self, other: &Self) -> Ordering {
-        // None is considered greater than any Some, so it goes last
         match (&self.score, &other.score) {
             (Some(a), Some(b)) => a.cmp(b),
             (Some(_), None) => Ordering::Less,
@@ -131,7 +142,7 @@ impl Triangle {
 
     fn draw(&self, image: &RgbaImage) -> RgbaImage{
         if self.points[0] == self.points[1] || self.points[1] == self.points[2] || self.points[0] == self.points[2] {
-            return image.clone(); // skip drawing invalid triangle
+            return image.clone();
         }
         let mut blended_canvas = Blend(image.clone());
         draw_polygon_mut(&mut blended_canvas, &self.points, self.color);
@@ -169,7 +180,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (w, h) = target_image.dimensions();
     fs::create_dir_all("images")?;
 
-    // Get input
     let mut input = String::new();
     print!("Population size: ");
     io::stdout().flush()?;
@@ -195,6 +205,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut temperature: f32 = input.trim().parse()?;
     input.clear();
 
+    print!("Additional iterations if no improvement after initial iterations (e.g., 100): ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+    let emergency_iterations: usize = input.trim().parse()?;
+    input.clear();
 
     print!("Save every Nth triangle (e.g., 10): ");
     io::stdout().flush()?;
@@ -204,64 +219,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut canvas = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
 
+    let initial_population: Vec<Triangle> = (0..population_size)
+        .into_par_iter()
+        .map(|_| {
+            let mut tri = Triangle::get_random(w, h);
+            tri.score = Some(diff(&target_image, &tri.draw(&canvas)));
+            tri
+        })
+        .collect();
+
+    let mut heap = BottomNHeap::new();
+    for tri in initial_population {
+        heap.insert(tri);
+    }
+
     for triangle_index in 0..num_triangles {
-        // Step 1: generate population in parallel
-        let initial_population: Vec<Triangle> = (0..population_size)
-            .into_par_iter()
-            .map(|_| {
-                let mut tri = Triangle::get_random(w, h);
-                tri.score = Some(diff(&target_image, &tri.draw(&canvas)));
-                tri
-            })
-            .collect();
+        println!("\n--- Evolving Triangle #{} (out of {}) ---", triangle_index + 1, num_triangles);
+        println!("  Initial Heap Size: {}", heap.len());
 
-        let mut heap = BottomNHeap::new();
-        for tri in initial_population {
-            heap.insert(tri);
-        }
+        let score_before_this_triangle = diff(&target_image, &canvas);
+        println!("  Score of canvas before this triangle: {}", score_before_this_triangle);
 
-        for iter in 0..num_iterations {
-            // Step 3: take top 50%
-            let survivors = heap.remove_bottom_n(population_size / 2);
-            heap = BottomNHeap::new(); // clear old gen
+        let mut iter = 0;
+        let mut best_candidate_score_ever_this_triangle_evolution = u64::MAX;
 
-            // Step 4: mutate in parallel and re-evaluate
-            let mutated_population: Vec<Triangle> = survivors
+        loop {
+            let num_survivors = population_size / 2;
+            let num_mutants_to_generate = population_size - num_survivors;
+
+            let mut current_triangles: Vec<Triangle> = heap.into_par_iter().collect();
+            current_triangles.par_sort_unstable_by_key(|t| t.score.unwrap_or(u64::MAX));
+
+            let survivors: Vec<Triangle> = current_triangles.drain(0..num_survivors).collect();
+
+            let mutated_offspring: Vec<Triangle> = (0..num_mutants_to_generate)
                 .into_par_iter()
-                .map(|s| {
+                .map(|_| {
+                    let mut rng = rand::rng();
+                    let parent_index = rng.random_range(0..survivors.len());
+                    let s = &survivors[parent_index];
                     let mut mutated = s.get_mutated(temperature, w, h);
                     mutated.score = Some(diff(&target_image, &mutated.draw(&canvas)));
                     mutated
                 })
                 .collect();
 
-            for m in mutated_population {
+            heap = BottomNHeap::new();
+            for s in survivors {
+                heap.insert(s);
+            }
+            for m in mutated_offspring {
                 heap.insert(m);
             }
 
-            // Cooldown
-            temperature *= 0.99;
+            let current_iteration_best_candidate_score = heap.iter().min_by_key(|t| t.score.unwrap_or(u64::MAX)).map(|t| t.score.unwrap_or(u64::MAX)).unwrap_or(u64::MAX);
 
-            // Log progress
-            if let Some(best) = heap.iter().min_by_key(|t| t.score.unwrap()) {
-                println!(
-                    "Triangle {:03}, Iteration {:03} — Best Score: {}",
-                    triangle_index,
-                    iter,
-                    best.score.unwrap()
-                );
+            if current_iteration_best_candidate_score < best_candidate_score_ever_this_triangle_evolution {
+                best_candidate_score_ever_this_triangle_evolution = current_iteration_best_candidate_score;
             }
+
+            println!(
+                "  Iteration {:03} — Best Candidate Score (current iter): {}, Best Candidate Score (overall): {}, Heap Size: {}, Temperature: {:.5}",
+                iter + 1,
+                current_iteration_best_candidate_score,
+                best_candidate_score_ever_this_triangle_evolution,
+                heap.len(),
+                temperature,
+            );
+
+            // Condition to stop:
+            // 1. We have completed the minimum required iterations (`num_iterations`)
+            // AND the best candidate found so far for this triangle *would improve* the overall image.
+            if iter >= num_iterations - 1 && best_candidate_score_ever_this_triangle_evolution < score_before_this_triangle {
+                println!("  Stopping: Achieved overall image improvement within or after initial iterations.");
+                break;
+            }
+
+            // 2. We have completed the minimum required iterations
+            // AND we have also completed the emergency iterations
+            // AND we have *not* achieved overall image improvement.
+            if iter >= num_iterations - 1 + emergency_iterations {
+                println!("  Stopping: Reached emergency iteration limit without improving overall image score.");
+                break;
+            }
+
+            iter += 1;
         }
 
-        if let Some(best) = heap.iter().min_by_key(|t| t.score.unwrap()) {
-            canvas = best.draw(&canvas);
+        if let Some(best_triangle_for_this_gen) = heap.iter().min_by_key(|t| t.score.unwrap_or(u64::MAX)) {
+            canvas = best_triangle_for_this_gen.draw(&canvas);
 
             if triangle_index % save_every_n == 0 {
                 let filename = format!("images/step_{:04}.png", triangle_index);
+                println!("  Saving current image to {}", filename);
                 canvas.save(&filename)?;
             }
         }
     }
+
+    canvas.save("images/final_result.png")?;
+    println!("\nGenetic algorithm finished! Final image saved to images/final_result.png");
 
     Ok(())
 }

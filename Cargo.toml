@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+gradient = "0.4.1"
 image = "0.25.1"
 imageproc = "0.25.0"
 rand = "0.9.1"
