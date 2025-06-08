@@ -202,10 +202,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("Initial temperature (e.g., 0.1): ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut input)?;
-    let mut temperature: f32 = input.trim().parse()?;
+    let temperature: f32 = input.trim().parse()?;
     input.clear();
 
-    print!("Additional iterations if no improvement after initial iterations (e.g., 100): ");
+    print!("Emergency Iterations (e.g., 100): ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut input)?;
     let emergency_iterations: usize = input.trim().parse()?;
@@ -279,11 +279,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!(
-                "  Iteration {:03} — Best Candidate Score (current iter): {}, Best Candidate Score (overall): {}, Heap Size: {}, Temperature: {:.5}",
+                "  Iteration {:03} — Best: {}, Best Overall: {}, Temp: {:.5}",
                 iter + 1,
                 current_iteration_best_candidate_score,
                 best_candidate_score_ever_this_triangle_evolution,
-                heap.len(),
                 temperature,
             );
 
